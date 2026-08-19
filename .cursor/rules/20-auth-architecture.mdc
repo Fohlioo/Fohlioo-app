@@ -1,0 +1,153 @@
+---
+description: Auth architecture — signup/login and the extension handoff flow. Read this in full before touching anything under app/auth/.
+alwaysApply: true
+---
+
+# Auth Architecture
+
+## Provider
+
+Supabase Auth. Two methods only for v1: **email/password** and **Google
+OAuth**. Do not add magic link, phone auth, or other providers without
+explicit instruction.
+
+## Two account types, one auth table
+
+Both shoppers and brands sign in through `auth.users` (Supabase's built-in
+table). Which dashboard they land on is determined by a `role` field on a
+`profiles` table, not by separate auth systems.
+
+```sql
+-- profiles: extends auth.users with app-specific fields
+create table profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  role text not null check (role in ('shopper', 'brand')),
+  first_name text,
+  marketing_opt_in boolean default false,
+  created_at timestamptz default now()
+);
+
+-- shoppers: the existing table from fohlioo-api, gets a user_id column
+-- (this is a migration on the EXISTING shoppers table — see fohlioo-api's
+-- supabase/schema.sql. Do not recreate this table here.)
+alter table shoppers add column if not exists user_id uuid references auth.users(id);
+alter table shoppers add column unique (user_id);
+```
+
+Brand accounts are a separate table (`brand_accounts`) linked the same way
+via `user_id` — not built yet, do not scaffold until asked.
+
+## Signup fields — keep this minimal
+
+**Required at signup (shopper):**
+- Email
+- Password (or Google OAuth, skips password entirely)
+- First name
+- Terms of Service + Privacy Policy consent (checkbox, required, not
+  pre-checked)
+
+**Required at signup, separate flow (brand):**
+- Not self-serve at MVP. Invite-only. Do not build a public brand signup
+  form without explicit instruction — this is intentionally gated while
+  the consumer side is being proven out.
+
+**Explicitly excluded from signup** — do not add these fields even if they
+seem helpful:
+- Style preference, size, gender, favourite brands. These undermine the
+  product's core thesis (segmentation from *behaviour*, not self-report).
+  If product wants a post-signup enrichment step, that's a separate,
+  skippable onboarding screen — not part of the signup form itself.
+
+**Explicitly separate checkbox:**
+- Marketing opt-in must be its own checkbox, unchecked by default, never
+  bundled with the Terms checkbox. This is a UK/GDPR requirement, not a
+  style preference — do not combine them to reduce form friction.
+
+## The extension handoff flow
+
+This is the part with real technical constraints. Read it fully before
+implementing any piece of it.
+
+### Why this is needed
+
+The extension's popup UI is too small for a real login form. Auth has to
+happen on the web app; the extension needs a way to receive the resulting
+session without the user manually copying tokens around.
+
+### Sequence
+
+1. **Extension side** (not this repo, but you need to know the contract):
+   popup has no valid session in `chrome.storage.local` → user clicks
+   "Sign in" → extension opens `https://app.fohlioo.co/auth/extension` in
+   a new tab, with the extension's `extension_id` appended as a query
+   param: `/auth/extension?ext_id=<uuid>`
+
+2. **This app**: `/auth/extension` page renders the normal login/signup UI
+   (reuse the same components as `/auth/login` and `/auth/signup` — do not
+   fork a separate form), but in "extension mode." Pass `ext_id` through
+   any redirects.
+
+3. **On successful auth** (login or signup), while still on
+   `/auth/extension`, call `POST /api/auth/extension-code` with the
+   `ext_id`. This route:
+   - Confirms there's a valid Supabase session (server-side, from the
+     request's cookies — never trust a client-passed user id)
+   - Generates a random single-use code (e.g. `crypto.randomUUID()` or a
+     shorter nanoid — either is fine, doesn't need to be guessable)
+   - Inserts it into an `extension_auth_codes` table with a 60-second
+     expiry, the `user_id`, and the `ext_id` it was requested for
+   - Returns the code to the page
+
+   ```sql
+   create table extension_auth_codes (
+     code text primary key,
+     user_id uuid references auth.users(id) not null,
+     extension_id text not null,
+     expires_at timestamptz not null,
+     used boolean default false,
+     created_at timestamptz default now()
+   );
+   ```
+
+4. **This app**: once the code is returned, the success page fires a
+   `window.postMessage({ type: 'FOHLIOO_AUTH_CODE', code }, '*')`. The
+   extension has a content script injected on `app.fohlioo.co/*`
+   (declared in its manifest — confirm this permission exists, flag it to
+   the user if not) listening for exactly this message type. Show a clear
+   "Signed in — you can close this tab" state after firing it; don't
+   auto-close the tab yourself, browsers block that from scripts that
+   didn't open the window themselves in all cases.
+
+5. **Extension side** (fohlioo-api's responsibility, not this repo):
+   content script relays the code to `background.ts`, which calls
+   fohlioo-api's `POST /api/v1/auth/exchange` with `{ code, extension_id }`.
+   That endpoint validates the code (unused, unexpired, `extension_id`
+   matches), returns a Supabase access + refresh token pair, and — this is
+   the important part — **merges** the anonymous `shoppers` row (matched
+   by `extension_id`) into the authenticated user by setting
+   `shoppers.user_id`. Any events already logged under that anonymous
+   shopper stay intact; they're just now attached to an identified user.
+
+### What this app must NOT do
+
+- Must not generate or store Supabase access/refresh tokens itself for the
+  extension to consume directly via the page — the one-time code is the
+  only thing that crosses from web page to extension. Tokens are only ever
+  exchanged server-to-server between the extension's background script and
+  fohlioo-api.
+- Must not skip the expiry/single-use check reasoning even though it's
+  fohlioo-api that enforces it — if you're asked to build the
+  `extension-code` route, make sure the code is genuinely single-use and
+  short-lived on this side too (don't return a long-lived value here that
+  fohlioo-api then treats as if it were short-lived).
+
+### Open items to flag, not silently decide
+
+- Google OAuth redirect URIs need to be registered per-environment (local,
+  staging, prod) in the Supabase dashboard and Google Cloud Console — this
+  isn't something to configure from inside a code change; flag it as a
+  manual setup step if it comes up.
+- The exact `app.fohlioo.co` origin (or whatever the deployed domain ends
+  up being) needs to be added to the extension's `host_permissions` in its
+  `manifest` — a fohlioo-extension change, not this repo, but the two need
+  to agree on the domain before this flow can work end-to-end.

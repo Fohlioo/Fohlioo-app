@@ -1,0 +1,54 @@
+---
+description: Fohlioo project overview — what we're building and why. Always applies.
+alwaysApply: true
+---
+
+# Fohlioo — Project Overview
+
+Fohlioo is an AI fashion intelligence platform. The core thesis: a browser
+extension captures cross-brand shopper behavioural signals (dwell time,
+scroll depth, wishlist adds, purchase patterns) and converts them into two
+products:
+
+1. **Shopper intelligence layer** — a personalised profile for the shopper
+   themselves, built from their own behaviour across every fashion site
+   they visit
+2. **Brand analytics portal** — aggregated, anonymised behavioural
+   intelligence sold to fashion brands (e.g. "23% of your customers are
+   Investment Dressers who comparison-shop before buying")
+
+Shoppers are classified into four behavioural archetypes derived entirely
+from observed behaviour (never self-reported): Investment Dresser, Trend
+Chaser, Quiet Minimalist, Brand Loyalist. See `docs/segmentation-model.md`
+if present for the full classification logic — do not invent new segments
+or thresholds without checking that doc first.
+
+## The three repositories
+
+This is one of three separate codebases. Know which one you're in and
+don't blur their responsibilities:
+
+| Repo | Purpose | Stack |
+|---|---|---|
+| **fohlioo-extension** | Chrome extension (Manifest V3). Captures product data + behavioural events on fashion sites. | Plasmo, TypeScript |
+| **fohlioo-api** | Backend. Event ingestion, auth token exchange, (later) segmentation engine. | Hono, TypeScript, Supabase (Postgres + pgvector) |
+| **fohlioo-app** (this repo) | Public-facing web app: landing page, signup/login, shopper dashboard, brand dashboard. | Next.js 14 (App Router), TypeScript, Tailwind, Supabase Auth |
+
+If a task feels like it belongs in a different repo (e.g. "add a new event
+type" belongs in fohlioo-extension + fohlioo-api, not here), say so rather
+than building it in the wrong place.
+
+## Non-negotiables
+
+- **Behavioural data drives segmentation, not declared data.** Never add
+  onboarding fields that ask shoppers to self-report style, size, or brand
+  preference as a blocking signup step. That undermines the entire product
+  thesis. Optional post-signup enrichment is fine.
+- **Shopper and brand are two distinct user types** sharing one Supabase
+  `auth.users` table but different `profiles`/`brand_accounts` shape and
+  different dashboard routes. Don't merge their data models out of
+  convenience.
+- **The extension is the source of truth for anonymous activity.** Every
+  install gets an `extension_id` before any account exists. Signup must
+  never discard that shopper's pre-signup event history — see
+  `20-auth-architecture.mdc` for the merge requirement.

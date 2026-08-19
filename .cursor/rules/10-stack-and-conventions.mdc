@@ -1,0 +1,66 @@
+---
+description: Stack, folder structure, and coding conventions for fohlioo-app.
+alwaysApply: true
+---
+
+# Stack & Conventions — fohlioo-app
+
+## Stack
+
+- **Next.js 14, App Router** — no Pages Router. Server Components by
+  default; add `"use client"` only where interactivity requires it.
+- **TypeScript, strict mode.** No `any` without a comment explaining why.
+- **Tailwind CSS** for all styling. No CSS modules, no styled-components.
+- **Supabase Auth** for identity (email/password + Google OAuth). Supabase
+  Postgres is shared with fohlioo-api — this app reads/writes via the
+  Supabase client using the user's own session (RLS-scoped), never the
+  service role key. The service role key belongs only in fohlioo-api.
+- **Zod** for all form validation and API route input validation.
+
+## Folder structure
+
+```
+app/
+├── (marketing)/           # public landing page, pricing, about — no auth required
+│   └── page.tsx
+├── auth/
+│   ├── login/page.tsx
+│   ├── signup/page.tsx
+│   └── extension/page.tsx # extension handoff flow — see 20-auth-architecture.mdc
+├── dashboard/
+│   ├── shopper/           # shopper-facing dashboard, requires shopper session
+│   └── brand/             # brand-facing dashboard, requires brand session
+├── api/
+│   └── auth/
+│       └── extension-code/route.ts  # generates one-time handoff code
+lib/
+├── supabase/
+│   ├── client.ts          # browser client
+│   └── server.ts          # server component / route handler client
+├── auth/
+│   └── session.ts         # session helpers, role checks (shopper vs brand)
+components/
+├── ui/                    # shared primitives
+├── marketing/
+└── dashboard/
+```
+
+## Conventions
+
+- **Route protection**: use middleware (`middleware.ts`) to redirect
+  unauthenticated users away from `/dashboard/*`, and to redirect shoppers
+  away from `/dashboard/brand/*` and vice versa. Don't scatter auth checks
+  ad hoc inside individual pages.
+- **Server Actions over API routes** for form submissions where possible
+  (signup, login, profile updates). Reserve `app/api/*` route handlers for
+  things external clients call — specifically the extension handoff code
+  endpoint, and anything the Chrome extension itself needs to hit.
+- **Never trust client-submitted `user_id` or `shopper_id`.** Always derive
+  identity from the verified Supabase session server-side.
+- **Naming**: `snake_case` for database columns (matches fohlioo-api's
+  Supabase schema), `camelCase` for TypeScript variables/functions. Map at
+  the query boundary, don't leak snake_case into component props.
+- **No new database tables or columns without checking fohlioo-api's
+  `supabase/schema.sql` first** — the schema is shared infrastructure, not
+  owned by this repo alone. If a feature needs a schema change, flag it
+  explicitly rather than silently adding a migration here.
